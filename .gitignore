@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+exp_env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VSCode / PyCharm
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables
+backend/.env
+
+# Cache
+.cache/
+*.pytest_cache/
+.pytest_cache/
+
+# LangChain / OpenAI
+*.faiss
+*.db
+
+# Uvicorn reload artifacts
+*.pid
+# Local project data (do not push)
+database/
+backend/qdrant_data/
