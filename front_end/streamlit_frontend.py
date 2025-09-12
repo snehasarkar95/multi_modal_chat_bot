@@ -4,8 +4,18 @@ from datetime import datetime
 import json
 from database_handler import db_handler
 import wikipedia
+import os
+import tempfile
+from pathlib import Path
+import PyPDF2
+import docx
+import pandas as pd
+from PIL import Image
+import io
+import docprocessor
+import mimetypes
 
-BACKEND_URL = "http://localhost:8000"
+BACKEND_URL = "http://localhost:7002"
 
 st.set_page_config(
     page_title="Multi-Platform App",
@@ -31,21 +41,25 @@ st.markdown("""
     }
     .message {
         padding: 10px;
-        margin: 5px 0;
         border-radius: 10px;
-        max-width: 70%;
+        margin-bottom: 10px;
+        line-height: 1.4;
+        color: #262730 !important; /* Dark text color */
     }
     .user-message {
-        background-color: #007bff;
-        color: white;
-        margin-left: auto;
-        text-align: right;
+        background-color: #e6f7ff;
+        border-left: 5px solid #1890ff;
     }
     .bot-message {
-        background-color: #e9ecef;
-        color: #333;
-        margin-right: auto;
+        background-color: #f9f9f9;
+        border-left: 5px solid #52c41a;
     }
+    .stContainer {
+        padding-bottom: 20px;
+    }
+    .stTextInput input {
+    color: #262730 !important;
+    background-color: white !important;
     .url-form {
         background-color: #f8f9fa;
         padding: 20px;
@@ -148,7 +162,7 @@ def fetch_wikipedia_data(topic: str, lang: str):
         return {"success": False, "message": f"Error fetching data: {str(e)}"}
 
 st.sidebar.title("🚀 Navigation")
-app_mode = st.sidebar.radio("Select Platform", ["Chat Agent", "Data Storage", "Statistics", "Database Management"])
+app_mode = st.sidebar.radio("Select Platform", ["Chat Agent", "Data Storage", "Statistics", "Data Upload"])#, "Database Management"])
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Quick Actions")
@@ -163,33 +177,19 @@ st.markdown('<h1 class="main-header">Multi-Platform Application</h1>', unsafe_al
 # Chat Platform Tab
 if app_mode == "Chat Agent":
     st.header("💬 RAG Chat Agent")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        rag_mode = st.button("🧠 RAG Mode", 
-                           help="Use stored Wikipedia knowledge (Retrieval Augmented Generation)",
-                           use_container_width=True)
-    
-    with col2:
-        web_mode = st.button("🌐 Web Search", 
-                           help="Search the web for current information",
-                           use_container_width=True)
-    
-    with col3:
-        deep_mode = st.button("🤔 Think Deep", 
-                            help="Use advanced reasoning without external context",
-                            use_container_width=True)
-    
-    if "chat_mode" not in st.session_state:  # default mode to RAG
-        st.session_state.chat_mode = "rag"
-
-    if rag_mode:
-        st.session_state.chat_mode = "rag"
-    if web_mode:
-        st.session_state.chat_mode = "web"
-    if deep_mode:
-        st.session_state.chat_mode = "deep"
-    
+    st.sidebar.subheader("Chat Agent Modes")
+    chat_mode = st.sidebar.radio(
+        "Choose Mode",
+        ["🧠 RAG Mode", "🌐 Web Search", "🤔 Think Deep"],
+        index=0
+    )
+    # Map sidebar selection to session_state.chat_mode
+    mode_mapping = {
+        "🧠 RAG Mode": "rag",
+        "🌐 Web Search": "web",
+        "🤔 Think Deep": "deep"
+    }
+    st.session_state.chat_mode = mode_mapping[chat_mode]
     mode_colors = {
         "rag": "#4CAF50",    # Green
         "web": "#2196F3",    # Blue
@@ -219,45 +219,39 @@ if app_mode == "Chat Agent":
         **🌐 Web Search**: Searches the Wikipedia for current information with feature of only summary.  
         **🤔 Think Deep**: Uses advanced reasoning without external context for creative responses.
         """)
-    chat_container = st.container()
+    chat_container = st.container(height=400)
     with chat_container:
-        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+        # st.markdown('<div class="chat-container">', unsafe_allow_html=True)
         for message in st.session_state.messages:
             if message['role'] == 'user':
-                mode_indicator = ""
-                if message.get('mode'):
-                    mode_emoji = {"rag": "🧠", "web": "🌐", "deep": "🤔"}.get(message['mode'], "")
-                    mode_indicator = f"<small style='color: #666;'>{mode_emoji} {message['mode'].upper()}</small><br>"
-                
-                st.markdown(f'''
-                <div class="message user-message">
-                    <strong>You:</strong><br>
-                    {mode_indicator}
-                    {message["content"]}
-                </div>
-                ''', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="message bot-message"><strong>AI:</strong> {message["content"]}</div>', 
+                st.markdown(f'<div class="message user-message"><strong>You:</strong> {message["content"]}</div>', 
                            unsafe_allow_html=True)
-                if message.get('sources') and message.get('mode') == 'rag':
-                    with st.expander("📚 Sources used (from your knowledge)"):
-                        for i, source in enumerate(message['sources']):
-                            st.markdown(f"""
-                            <div class="source-item">
-                                <strong>Source {i+1}:</strong> {source.get('title', 'Unknown')}<br>
-                                <strong>Relevance score:</strong> {source.get('score', 0):.3f}<br>
-                                <em>{source.get('content', '')[:150]}...</em>
-                            </div>
-                            """, unsafe_allow_html=True)
-                if message.get('web_context') and message.get('mode') == 'web':
-                    with st.expander("🌐 Web Search Results"):
-                        st.markdown(f"""
-                        <div class="source-item">
-                            <strong>Web Context:</strong><br>
-                            <em>{message['web_context'][:200]}...</em>
-                        </div>
-                        """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                content = message["content"]
+                if message.get("mode") == "rag" and message.get("sources"):
+                    source_list = message.get('sources', [])
+                    if source_list and isinstance(source_list[0], dict):
+                        sources_formatted = []
+                        for source in source_list:
+                            topic = source.get("metadata", "Unknown").get("Header 2", "Unknown")
+                            confidence = source.get("score", "Unknown")
+                            source_name = source.get("url", "Unknown")
+                            sources_formatted.append(f"- Topic: {topic} | Confidence: {confidence} | Source: {source_name}")
+
+                        content += "\n\n**Sources:**\n" + "\n".join(sources_formatted)
+                    else:
+                        content += f"\n\n**Sources:** {', '.join(str(s) for s in source_list)}"
+                
+                # Add web context for Web Search mode
+                if message.get("mode") == "web" and message.get("web_context"):
+                    content += f"\n\n*Web Context: {message.get('web_context')}*"
+                
+                # Add reasoning for Think Deep mode
+                if message.get("mode") == "deep" and message.get("reasoning"):
+                    content += f"\n\n*Reasoning: {message.get('reasoning')}*"
+                
+                st.markdown(f'<div class="message bot-message"><strong>Bot:</strong> {content}</div>', 
+                           unsafe_allow_html=True)
     col1, col2 = st.columns([6, 1])
     with col1:
         user_input = st.text_input("Type your message...", key="chat_input", label_visibility="collapsed")
@@ -268,7 +262,6 @@ if app_mode == "Chat Agent":
         st.session_state.messages.append({"role": "user", "content": user_input, "mode": st.session_state.chat_mode})
         with st.spinner("Thinking..."):
             response = send_chat_message(user_input, st.session_state.chat_mode)
-            
             # Add AI response
             assistant_message = {
                 "role": "assistant",
@@ -285,10 +278,18 @@ if app_mode == "Chat Agent":
             st.session_state.messages.append(assistant_message)
         
         st.rerun()
-    
     # Clear chat button
     if st.button("Clear Chat", type="secondary"):
-        st.session_state.messages = []
+        try:
+            st.session_state.messages = []
+            session_id = "default"
+            response = requests.post(f"http://localhost:8000/chat/clear/{session_id}")
+            if response.status_code == 200:
+                st.success("Chat cleared successfully!")
+            else:
+                st.warning("Frontend chat cleared, but there was an issue with the backend.")
+        except Exception as e:
+            st.error(f"Error clearing chat: {e}")
         st.rerun()
 
 ########################################### Data Storage ###############################################
@@ -306,7 +307,7 @@ elif app_mode == "Data Storage":
     if submitted and topic and lang:
         with st.spinner(f"Fetching Wikipedia data for '{topic}'..."):
             result = fetch_wikipedia_data(topic, lang)
-            
+
             if result.get('success'):
                 st.session_state.wikipedia_data = result
                 st.success(f"✅ Successfully fetched data for: {result['title']}")
@@ -446,15 +447,219 @@ elif app_mode == "Database Management":
                         st.error("Restore failed!")
     else:
         st.info("No backups available yet. Create a backup using the options above.")
+########################################################################################################
+
+#################################### Data Upload #######################################################
+elif app_mode ==  "Data Upload":
+    st.header("📁 Data Upload Platform")
+
+    mimetypes.init() # Initializing mimetypes
+
+    supported_file_types = {
+        "Text Documents": {
+            "extensions": ["docx", "doc", "pdf", "txt", "md", "rtf", "odt"],
+            "description": "Word documents, PDFs, text files, Markdown, RTF, and OpenDocument Text",
+            "mime_types": ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+                          "application/msword", 
+                          "application/pdf", 
+                          "text/plain", 
+                          "text/markdown", 
+                          "application/rtf", 
+                          "application/vnd.oasis.opendocument.text"]
+        },
+        "Spreadsheets": {
+            "extensions": ["xlsx", "xls", "csv", "ods"],
+            "description": "Excel files, CSV, and OpenDocument Spreadsheets",
+            "mime_types": ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                          "application/vnd.ms-excel",
+                          "text/csv",
+                          "application/vnd.oasis.opendocument.spreadsheet"]
+        },
+        "Presentations": {
+            "extensions": ["pptx", "odp"],
+            "description": "PowerPoint presentations and OpenDocument Presentations",
+            "mime_types": ["application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                          "application/vnd.oasis.opendocument.presentation"]
+        },
+        "Images": {
+            "extensions": ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"],
+            "description": "Common image formats for visual content",
+            "mime_types": ["image/jpeg", "image/png", "image/gif", "image/bmp", "image/tiff", "image/webp"]
+        },
+        "Structured Data": {
+            "extensions": ["json", "xml", "yaml", "yml"],
+            "description": "JSON, XML, and YAML files for structured data",
+            "mime_types": ["application/json", "application/xml", "text/x-yaml", "application/x-yaml"]
+        },
+        "Code & Logs": {
+            "extensions": ["py", "js", "java", "c", "cpp", "html", "css", "log", "txt"],
+            "description": "Source code files and log files",
+            "mime_types": ["text/x-python", "application/javascript", "text/x-java", "text/x-c", "text/x-c++", 
+                          "text/html", "text/css", "text/plain"]
+        },
+        "Research Articles": {
+            "extensions": ["pdf", "docx", "tex"],
+            "description": "Academic papers and research documents",
+            "mime_types": ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+                          "application/x-tex"]
+        },
+        "Large Files": {
+            "extensions": ["zip", "tar", "gz", "7z", "rar"],
+            "description": "Archived files for batch processing",
+            "mime_types": ["application/zip", "application/x-tar", "application/gzip", "application/x-7z-compressed", 
+                          "application/x-rar-compressed"]
+        }
+    }
+    with st.expander("📋 Supported File Formats (Up to 1GB)", expanded=False):
+        st.info("💡 Large files may take longer to process. Progress indicators will show processing status.")
+        for category, info in supported_file_types.items():
+            st.markdown(f"**{category}**")
+            st.markdown(f"*{info['description']}*")
+            st.markdown(f"Extensions: `{', '.join(info['extensions'])}`")
+            st.markdown(f"MIME Types: `{', '.join(info['mime_types'])}`")
+            st.markdown("---")
+    
+    st.markdown("---")
+    uploaded_files = st.file_uploader(
+        "Drop any file", 
+        accept_multiple_files=True,
+        help="Upload documents to process and store in the knowledge base"
+    )
+    
+    if uploaded_files:
+        st.subheader("📄 Uploaded Files")
+        file_tabs = st.tabs([f"{i+1}. {file.name}" for i, file in enumerate(uploaded_files)])
+        if 'processed_files' not in st.session_state:
+            st.session_state.processed_files = {}
+            st.session_state.preview_data = {}
+            st.session_state.file_info = {}
+
+        for uploaded_file in uploaded_files:
+            if uploaded_file.name not in st.session_state.file_info:
+                file_content = uploaded_file.getvalue()
+                mime_type, extension = docprocessor.detect_file_type(file_content, uploaded_file.name)
+                category = docprocessor.categorize_file(mime_type, extension, supported_file_types)
+                
+                st.session_state.file_info[uploaded_file.name] = {
+                    "mime_type": mime_type,
+                    "extension": extension,
+                    "category": category
+                }
+                uploaded_file.seek(0)   
+
+        for i, (uploaded_file, tab) in enumerate(zip(uploaded_files, file_tabs)):
+            with tab:
+                file_info = st.session_state.file_info[uploaded_file.name]
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.write(f"**File Name:** {uploaded_file.name}")
+                    st.write(f"**Detected MIME Type:** {file_info['mime_type']}")
+                    st.write(f"**File Extension:** {file_info['extension']}")
+                    st.write(f"**File Size:** {uploaded_file.size / 1024:.2f} KB")
+                    st.write(f"**Category:** {file_info['category']}")
+                with col2:
+                    process_key = f"process_{i}"
+                    if st.button("⚙️ Process", key=process_key, use_container_width=True):
+                        with st.spinner(f"Processing {uploaded_file.name}..."):
+                            try:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
+                                    tmp_file.write(uploaded_file.getvalue())
+                                    tmp_path = tmp_file.name
+                                processing_result, preview = docprocessor.process_uploaded_file(tmp_path, uploaded_file.name, file_info['extension'], file_info['mime_type'])
+                                st.session_state.processed_files[uploaded_file.name] = processing_result
+                                st.session_state.preview_data[uploaded_file.name] = preview
+                                os.unlink(tmp_path)
+                                st.success(f"✅ {uploaded_file.name} processed successfully!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error processing {uploaded_file.name}: {str(e)}")
+                if uploaded_file.name in st.session_state.processed_files:
+                    file_data = st.session_state.processed_files[uploaded_file.name]
+                    preview = st.session_state.preview_data[uploaded_file.name]
+                    st.markdown("---")
+                    st.markdown("### 📊 Processing Results")
+                    # Display metadata
+                    if file_data.get("metadata"):
+                        with st.expander("📋 Metadata"):
+                            st.json(file_data["metadata"])
+                    if file_data["type"] in ["text", "document", "code", "log"] and file_data.get("content"):
+                        preview_content = file_data["content"]
+                        if len(preview_content) > 2000:
+                            preview_content = preview_content[:2000] + "..."
+                        
+                        st.text_area("Extracted Content", 
+                                    value=preview_content,
+                                    height=250,
+                                    key=f"content_{i}")
+                    
+                    elif file_data["type"] == "spreadsheet" and preview is not None:
+                        st.write("**Data Preview:**")
+                        st.dataframe(preview)
+                        st.write(f"**Shape:** {file_data['metadata']['total_rows']} rows × {file_data['metadata']['total_columns']} columns")
+                    
+                    elif file_data["type"] == "image" and file_data.get("metadata"):
+                        st.write(f"**Image Dimensions:** {file_data['metadata'].get('width', 'N/A')} × {file_data['metadata'].get('height', 'N/A')}")
+                        st.write(f"**Format:** {file_data['metadata'].get('format', 'N/A')}")
+                    
+                    elif file_data["type"] == "structured_data" and file_data.get("content"):
+                        try:
+                            if isinstance(file_data["content"], (dict, list)):
+                                st.json(file_data["content"])
+                            else:
+                                parsed_content = json.loads(file_data["content"])
+                                st.json(parsed_content)
+                        except:
+                            st.text_area("Content", value=file_data["content"], height=250)
+        st.markdown("---")
+        st.subheader("🔄 Batch Operations")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("⚙️ Process All Files", use_container_width=True):
+                with st.spinner("Processing all files..."):
+                    for i, uploaded_file in enumerate(uploaded_files):
+                        try:
+                            if uploaded_file.name not in st.session_state.processed_files:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
+                                    tmp_file.write(uploaded_file.getvalue())
+                                    tmp_path = tmp_file.name
+                                
+                                file_info = st.session_state.file_info[uploaded_file.name]
+                                processing_result, preview = docprocessor.process_uploaded_file(
+                                    tmp_path, 
+                                    uploaded_file.name, 
+                                    file_info['extension'],
+                                    file_info['mime_type']
+                                )
+                                
+                                st.session_state.processed_files[uploaded_file.name] = processing_result
+                                st.session_state.preview_data[uploaded_file.name] = preview
+                                os.unlink(tmp_path)
+                        
+                        except Exception as e:
+                            st.error(f"Error processing {uploaded_file.name}: {str(e)}")
+                    
+                    st.success("All files processed!")
+                    st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Clear All Processing", type="secondary", use_container_width=True):
+                st.session_state.processed_files = {}
+                st.session_state.preview_data = {}
+                st.session_state.file_info = {}
+                st.rerun()
+    
+    else:
+        st.info("👆 Upload files using the file uploader above to get started")
 
 # Footer
 st.markdown("---")
 st.markdown("### 📊 Stats")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Chat Messages", len([m for m in st.session_state.messages if m['role'] == 'user']))
-with col2:
-    st.metric("Submitted URLs", len(st.session_state.submitted_urls))
-with col3:
-    active_urls = len([u for u in st.session_state.submitted_urls if u['status'] == 'Active'])
-    st.metric("Active URLs", active_urls)
+# col1, col2, col3 = st.columns(3)
+# with col1:
+st.metric("Chat Messages", len([m for m in st.session_state.messages if m['role'] == 'user']))
+# with col2:
+#     st.metric("Submitted URLs", len(st.session_state.submitted_urls))
+# with col3:
+#     active_urls = len([u for u in st.session_state.submitted_urls if u['status'] == 'Active'])
+#     st.metric("Active URLs", active_urls)

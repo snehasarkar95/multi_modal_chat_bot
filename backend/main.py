@@ -1,23 +1,27 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 import uvicorn
 import wikipedia
 from wikipedia_processor import WikipediaProcessor
 from vector_store import VectorStore
 from llm_chat import LLMChat
 import logging
+from fetch_web_context import format_web_context
+from web_search_manager import web_search_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 # Initialize FastAPI app
 app = FastAPI(title="Wikipedia Chat API", version="1.0.0")
+session_histories: Dict[str, LLMChat] = {}
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501"],  # Streamlit frontend
+    allow_origins=["http://localhost:7001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,6 +43,7 @@ class ChatRequest(BaseModel):
     message: str
     chat_mode: str = "rag"
     use_context: bool = True 
+    session_id: Optional[str] = "default" 
 
 class ChatResponse(BaseModel):
     response: str
@@ -80,6 +85,11 @@ async def process_data(request: WikiRequest):
 async def chat(request: ChatRequest):
     """Chat with LLM using different modes with fallback mechanisms"""
     try:
+        session_id = request.session_id or "default"
+        if session_id not in session_histories:
+            session_histories[session_id] = LLMChat(history_window=5)  # keep last 5 turns
+        llm_chat = session_histories[session_id]
+
         sources = []
         web_context = ""
         reasoning = ""
@@ -94,6 +104,9 @@ async def chat(request: ChatRequest):
         mode_used = request.chat_mode
         
         try:
+            # --------------------------
+            # ✅ RAG mode
+            # --------------------------
             if request.chat_mode == "rag":
                 sources = vector_store.search_similar(request.message, limit=3)
                 if sources and any(source.get('score', 0) > 0.3 for source in sources):
@@ -103,59 +116,42 @@ async def chat(request: ChatRequest):
                     fallback_used = True
                     mode_used = "web"
                     logger.warning(f"RAG fallback: Insufficient results for '{request.message}', falling back to web search")
-                    
+
+            # --------------------------
+            # ✅ Web mode
+            # --------------------------        
             if request.chat_mode == "web" or (fallback_used and mode_used == "web"):
                 try:
-                    search_results = wikipedia.search(request.message)
-                    if search_results:
-                        page_title = search_results[0]
-                        logger.info(f"Web mode: Found Wikipedia page '{page_title}' for '{request.message}'")
-                        page = wikipedia.page(page_title, auto_suggest=False)
-                        summary = page.summary
-                        web_context = f"Wikipedia page: {page_title}\n\n{summary[:500]}..."
+                    web_results = await web_search_manager.combined_web_search(request.message)
+                    if web_results:
+                        logger.info(f"Web mode: Found {len(web_results)} combined results for '{request.message}'")
                         
+                        # Format web context for LLM
+                        web_context = format_web_context(web_results)
+                        # Generate response using web results as context
                         response = llm_chat.generate_response(
-                            f"Based on this Wikipedia content: {summary[:1000]}...\n\nQuestion: {request.message}",
-                            None, "web"
+                            request.message,
+                            web_results,  # Pass results as context
+                            "web"
                         )
                     else:
                         fallback_used = True
                         mode_used = "deep"
-                        logger.warning(f"Web fallback: No Wikipedia results for '{request.message}', falling back to deep research")
-                
-                except wikipedia.exceptions.DisambiguationError as e:
-                    options = e.options[:3]
-                    web_context = f"Disambiguation needed. Options: {', '.join(options)}"
-                    response = f"I found multiple possible topics for '{request.message}'. Did you mean: {', '.join(options)}?"
-                    logger.info(f"Web mode: Disambiguation needed for '{request.message}'")
-                
-                except wikipedia.exceptions.PageError:
-                    fallback_used = True
-                    mode_used = "deep"
-                    logger.warning(f"Web fallback: Page not found for '{request.message}', falling back to deep research")
+                        logger.warning(f"Web fallback: No web results for '{request.message}', falling back to deep research")
                 
                 except Exception as e:
                     fallback_used = True
                     mode_used = "deep"
                     logger.error(f"Web search error for '{request.message}': {e}, falling back to deep research")
             
+            # --------------------------
+            # ✅ Deep mode
+            # --------------------------
             if request.chat_mode == "deep" or (fallback_used and mode_used == "deep"):
                 reasoning = "Engaging in comprehensive analysis without external data sources...\n"
                 logger.info(f"Deep mode: Processing '{request.message}' with chain of thought")
-                cot_prompt = f"""Analyze the following query deeply and provide a well-reasoned response:
-
-Query: {request.message}
-
-Please follow this thought process:
-1. Understand the core concept and context
-2. Break down the query into key components
-3. Apply logical reasoning and critical thinking
-4. Consider multiple perspectives if applicable
-5. Provide a comprehensive, insightful response
-
-Reasoning:"""
-                reasoning_response = llm_chat.generate_response(cot_prompt, None, "deep")
-                reasoning += reasoning_response
+                reasoning_response = llm_chat.generate_response(request.message, None, "deep")
+                # reasoning += reasoning_response
                 response = reasoning_response.split("Final Response:")[-1] if "Final Response:" in reasoning_response else reasoning_response
                 if fallback_used and original_mode != "deep":
                     response = f"🔍 Note: I couldn't find specific information in my knowledge base, so I'm providing a general analysis:\n\n{response}"
@@ -184,6 +180,20 @@ Reasoning:"""
         logger.error(f"Chat API error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/chat/clear/{session_id}")
+async def clear_chat_session(session_id: str = "default"):
+    """Clear chat history for a specific session"""
+    try:
+        if session_id in session_histories:
+            del session_histories[session_id]
+            logger.info(f"Cleared session history for session_id: {session_id}")
+            return {"success": True, "message": f"Session {session_id} cleared"}
+        else:
+            return {"success": False, "message": f"Session {session_id} not found"}
+    except Exception as e:
+        logger.error(f"Error clearing session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/stats/")
 async def get_stats():
     """Get vector database statistics"""
@@ -199,8 +209,8 @@ async def health_check():
     return {"status": "healthy", "components": {
         "wikipedia_processor": "active",
         "vector_store": "active",
-        "llm_chat": "active" if llm_chat.model else "inactive"
+        "llm_chat": "active" if llm_chat.is_healthy() else "inactive"
     }}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=7002)
